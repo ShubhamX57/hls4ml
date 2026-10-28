@@ -67,6 +67,10 @@ class InferPrecisionTypes(ConfigurableOptimizerPass):
         if node_class in ['Pooling1D', 'Pooling2D']:
             return self._infer_pooling_precision(node, types_to_infer)
 
+        # Not for global max pooling: its accumulator would share the input's precision object, which Catapult widens
+        if node_class in ['GlobalPooling1D', 'GlobalPooling2D'] and node.get_attr('pool_op').lower() == 'average':
+            return self._infer_pooling_precision(node, types_to_infer)
+
         if node_class in ['Clone', 'Reshape', 'Resize', 'Transpose', 'ZeroPadding1D', 'ZeroPadding2D']:
             return self._infer_output_matching_precision(node, types_to_infer)
 
@@ -360,10 +364,18 @@ class InferPrecisionTypes(ConfigurableOptimizerPass):
     def _infer_pooling_precision(self, node, types_to_infer):
         inferred_types = []
 
-        if 'accum_t' in types_to_infer:
-            input_precision = node.get_input_variable().type.precision
-            pool_op = node.attributes['pool_op'].lower()
+        input_precision = node.get_input_variable().type.precision
+        pool_op = node.attributes['pool_op'].lower()
 
+        if node.class_name == 'GlobalPooling1D':
+            pool_size = node.get_attr('n_in')
+        elif node.class_name == 'GlobalPooling2D':
+            pool_size = node.get_attr('in_height') * node.get_attr('in_width')
+        else:
+            pool_size = node.get_attr('pool_height', 1) * node.get_attr('pool_width')
+        extra_bits = int(np.ceil(np.log2(pool_size)))
+
+        if 'accum_t' in types_to_infer:
             if pool_op == 'max':
                 # This has the benefit of working for xnor types. I don't think "copy" is needed
                 accum_type = input_precision
@@ -373,9 +385,6 @@ class InferPrecisionTypes(ConfigurableOptimizerPass):
                     width = input_precision.width
                     integer = input_precision.integer
                     signed = input_precision.signed
-
-                    pool_size = node.get_attr('pool_height', 1) * node.get_attr('pool_width')
-                    extra_bits = int(np.ceil(np.log2(pool_size)))
 
                     # for now ignore max precision in this case
                     accum_type = FixedPrecisionType(
@@ -393,7 +402,18 @@ class InferPrecisionTypes(ConfigurableOptimizerPass):
             inferred_types.append('accum_t')
 
         if 'result_t' in types_to_infer:
-            self._infer_output_matching_precision(node, ['result_t'])
+            if pool_op == 'average' and self._all_supported_types((input_precision,)):
+                # the mean stays within the input range, but has up to extra_bits more fractional bits
+                width = input_precision.width + extra_bits
+                integer = input_precision.integer
+                max_precision = self._get_maximum_precision(node)
+                if max_precision is not None:
+                    width = min(width, max_precision.width)
+                    integer = min(integer, max_precision.integer)
+                node.types['result_t'].name = node.name + '_result_t'
+                node.types['result_t'].precision = FixedPrecisionType(width, integer, input_precision.signed)
+            else:
+                self._infer_output_matching_precision(node, ['result_t'])
             inferred_types.append('result_t')
 
         return inferred_types

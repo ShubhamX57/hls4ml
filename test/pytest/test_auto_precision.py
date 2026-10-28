@@ -10,6 +10,8 @@ from tensorflow.keras.layers import (
     Conv2D,
     Dense,
     Flatten,
+    GlobalAveragePooling1D,
+    GlobalAveragePooling2D,
     ReLU,
     SeparableConv1D,
     SeparableConv2D,
@@ -288,6 +290,63 @@ def test_auto_precision_dense(test_case_id, keras_model_dense, data_1d, io_type,
     y_keras = model.predict(data).flatten()
     y_hls = hls_model.predict(data).flatten()
     np.testing.assert_allclose(y_keras, y_hls, rtol=2e-2, atol=5e-2, verbose=True)
+
+
+@pytest.mark.parametrize('io_type', ['io_stream', 'io_parallel'])
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis'])
+@pytest.mark.parametrize(
+    'pooling, input_shape',
+    [
+        (GlobalAveragePooling1D, (32, 4)),
+        (GlobalAveragePooling2D, (8, 8, 2)),
+        (AveragePooling1D, (32, 4)),
+        (AveragePooling2D, (8, 8, 2)),
+    ],
+)
+def test_auto_precision_average_pooling(test_case_id, pooling, input_shape, io_type, backend):
+    """With inferred types, the sum must not overflow and the mean must keep its fractional bits"""
+    model = Sequential()
+    model.add(pooling(name='pool', input_shape=input_shape))
+    model.compile()
+
+    data = np.random.randint(-128, 128, size=(100, *input_shape)) / 16  # exact in ap_fixed<8,4>
+
+    config = hls4ml.utils.config_from_keras_model(model, default_precision='ap_fixed<8,4>', granularity='model')
+    config['LayerName'] = {
+        'pool': {
+            'Precision': 'auto',
+        },
+    }
+    odir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        model, hls_config=config, io_type=io_type, output_dir=odir, backend=backend
+    )
+    hls_model.compile()
+
+    y_keras = model.predict(data).flatten()
+    y_hls = hls_model.predict(data).flatten()
+    np.testing.assert_array_equal(y_keras, y_hls)
+
+
+def test_auto_precision_average_pooling_max_precision(test_case_id):
+    """The inferred result type of average pooling is limited by max_precision"""
+    model = Sequential()
+    model.add(GlobalAveragePooling1D(name='pool', input_shape=(32, 4)))
+    model.compile()
+
+    config = hls4ml.utils.config_from_keras_model(
+        model, default_precision='ap_fixed<8,4>', max_precision='ap_fixed<10,3>', granularity='model'
+    )
+    config['LayerName'] = {
+        'pool': {
+            'Precision': 'auto',
+        },
+    }
+    odir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(model, hls_config=config, output_dir=odir, backend='Vivado')
+
+    result_precision = hls_model.graph['pool'].get_output_variable().type.precision
+    assert (result_precision.width, result_precision.integer) == (10, 3)
 
 
 @pytest.mark.parametrize(
