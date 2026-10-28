@@ -181,6 +181,44 @@ def test_single_dense_activation_exact(test_case_id, randX_100_16, bits, alpha, 
         np.testing.assert_allclose(y_qkeras.ravel(), y_hls4ml.ravel(), atol=2**-bits, rtol=1.0)
 
 
+@pytest.mark.parametrize('shape', [(8, 3), (2, 4, 3)])
+@pytest.mark.parametrize('bit_exact', [False, True])
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Quartus', 'Catapult'])
+@pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
+def test_qdense_multidimensional_input(test_case_id, shape, bit_exact, backend, io_type):
+    """
+    QDense on a multidimensional input is converted to a pointwise convolution,
+    which must still quantize the kernel and bias with the QKeras quantizers
+    """
+    rng = np.random.default_rng(0)
+    model = Sequential(
+        [
+            QActivation(activation=quantized_bits(6, 2, alpha=1), input_shape=shape, name='inp_quant'),
+            QDense(
+                4,
+                name='fc1',
+                kernel_quantizer=quantized_bits(6, 0, alpha=1),
+                bias_quantizer=quantized_bits(6, 0, alpha=1),
+            ),
+            QActivation(activation=quantized_relu(6, 2), name='relu1'),
+        ]
+    )
+    # Part of the kernel lies outside the quantizer range, where quantizing saturates but casting to the weight type wraps
+    model.get_layer('fc1').set_weights([rng.uniform(-1.5, 1.5, size=(shape[-1], 4)), rng.uniform(-1, 1, size=4)])
+    X = rng.integers(-32, 32, size=(100, *shape)) / 8
+
+    config = hls4ml.utils.config_from_keras_model(model, granularity='name', backend=backend)
+    output_dir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        model, hls_config=config, output_dir=output_dir, backend=backend, io_type=io_type, bit_exact=bit_exact
+    )
+    hls_model.compile()
+
+    y_qkeras = model.predict(X)
+    y_hls4ml = hls_model.predict(X).reshape(y_qkeras.shape)
+    np.testing.assert_array_equal(y_qkeras, y_hls4ml)
+
+
 @pytest.fixture
 def make_btnn(test_no, N, kernel_quantizer, bias_quantizer, activation_quantizer, use_batchnorm, is_xnor):
     shape = (N,)

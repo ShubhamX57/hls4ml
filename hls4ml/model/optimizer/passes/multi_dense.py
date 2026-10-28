@@ -24,6 +24,8 @@ class ReplaceMultidimensionalDenseWithConv(OptimizerPass):
             'n_filt': node.get_attr('n_out'),
             'weight_data': np.expand_dims(node.get_attr('weight_data'), axis=tuple(range(dim))),
             'bias_data': node.get_attr('bias_data'),
+            'weight_quantizer': node.get_attr('weight_quantizer'),
+            'bias_quantizer': node.get_attr('bias_quantizer'),
         }
 
         if (pf := node.get_attr('parallelization_factor', None)) is not None:
